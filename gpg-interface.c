@@ -73,6 +73,12 @@ static const char *ssh_sigs[] = {
 	NULL
 };
 
+static const char *keri_verify_args[] = { NULL };
+static const char *keri_sigs[] = {
+	"-----BEGIN CESR STREAM-----",
+	NULL
+};
+
 static int verify_gpg_signed_buffer(struct signature_check *sigc,
 				    struct gpg_format *fmt,
 				    const char *signature,
@@ -81,10 +87,16 @@ static int verify_ssh_signed_buffer(struct signature_check *sigc,
 				    struct gpg_format *fmt,
 				    const char *signature,
 				    size_t signature_size);
+static int verify_keri_signed_buffer(struct signature_check *sigc,
+				     struct gpg_format *fmt,
+				     const char *signature,
+				     size_t signature_size);
 static int sign_buffer_gpg(struct strbuf *buffer, struct strbuf *signature,
 			   const char *signing_key);
 static int sign_buffer_ssh(struct strbuf *buffer, struct strbuf *signature,
 			   const char *signing_key);
+static int sign_buffer_keri(struct strbuf *buffer, struct strbuf *signature,
+			    const char *signing_key);
 
 static char *get_default_ssh_signing_key(void);
 
@@ -120,6 +132,16 @@ static struct gpg_format gpg_format[] = {
 		.sign_buffer = sign_buffer_ssh,
 		.get_default_key = get_default_ssh_signing_key,
 		.get_key_id = get_ssh_key_id,
+	},
+	{
+		.name = "keri",
+		.program = "kli",
+		.verify_args = keri_verify_args,
+		.sigs = keri_sigs,
+		.verify_signed_buffer = verify_keri_signed_buffer,
+		.sign_buffer = sign_buffer_keri,
+		.get_default_key = NULL,
+		.get_key_id = NULL,
 	},
 };
 
@@ -783,6 +805,9 @@ static int git_gpg_config(const char *var, const char *value,
 	if (!strcmp(var, "gpg.ssh.program"))
 		fmtname = "ssh";
 
+	if (!strcmp(var, "gpg.keri.program"))
+		fmtname = "kli";
+
 	if (fmtname) {
 		fmt = get_format_by_name(fmtname);
 		return git_config_string((char **) &fmt->program, var, value);
@@ -1115,3 +1140,15 @@ out:
 	FREE_AND_NULL(ssh_signing_key_file);
 	return ret;
 }
+
+// TODO: Implement this
+static int verify_keri_signed_buffer(struct signature_check *sigc,
+				     struct gpg_format *fmt,
+				     const char *signature,
+				     size_t signature_size)
+{ return -1; }
+
+// TODO: Implement this
+static int sign_buffer_keri(struct strbuf *buffer, struct strbuf *signature,
+			    const char *signing_key)
+{ return -1; }
