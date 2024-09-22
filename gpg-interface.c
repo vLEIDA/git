@@ -14,6 +14,7 @@
 #include "sigchain.h"
 #include "tempfile.h"
 #include "alias.h"
+#include <stdio.h>
 
 static int git_gpg_config(const char *, const char *,
 			  const struct config_context *, void *);
@@ -73,6 +74,12 @@ static const char *ssh_sigs[] = {
 	NULL
 };
 
+static const char *keri_verify_args[] = { NULL };
+static const char *keri_sigs[] = {
+	"-----BEGIN CESR STREAM-----",
+	NULL
+};
+
 static int verify_gpg_signed_buffer(struct signature_check *sigc,
 				    struct gpg_format *fmt,
 				    const char *signature,
@@ -81,10 +88,16 @@ static int verify_ssh_signed_buffer(struct signature_check *sigc,
 				    struct gpg_format *fmt,
 				    const char *signature,
 				    size_t signature_size);
+static int verify_keri_signed_buffer(struct signature_check *sigc,
+				     struct gpg_format *fmt,
+				     const char *signature,
+				     size_t signature_size);
 static int sign_buffer_gpg(struct strbuf *buffer, struct strbuf *signature,
 			   const char *signing_key);
 static int sign_buffer_ssh(struct strbuf *buffer, struct strbuf *signature,
 			   const char *signing_key);
+static int sign_buffer_keri(struct strbuf *buffer, struct strbuf *signature,
+			    const char *signing_key);
 
 static char *get_default_ssh_signing_key(void);
 
@@ -120,6 +133,16 @@ static struct gpg_format gpg_format[] = {
 		.sign_buffer = sign_buffer_ssh,
 		.get_default_key = get_default_ssh_signing_key,
 		.get_key_id = get_ssh_key_id,
+	},
+	{
+		.name = "keri",
+		.program = "klx",
+		.verify_args = keri_verify_args,
+		.sigs = keri_sigs,
+		.verify_signed_buffer = verify_keri_signed_buffer,
+		.sign_buffer = sign_buffer_keri,
+		.get_default_key = NULL,
+		.get_key_id = NULL,
 	},
 };
 
@@ -783,6 +806,9 @@ static int git_gpg_config(const char *var, const char *value,
 	if (!strcmp(var, "gpg.ssh.program"))
 		fmtname = "ssh";
 
+	if (!strcmp(var, "gpg.keri.program"))
+		fmtname = "klx";
+
 	if (fmtname) {
 		fmt = get_format_by_name(fmtname);
 		return git_config_string((char **) &fmt->program, var, value);
@@ -1113,5 +1139,102 @@ out:
 	strbuf_release(&signer_stderr);
 	strbuf_release(&ssh_signature_filename);
 	FREE_AND_NULL(ssh_signing_key_file);
+	return ret;
+}
+
+static int sign_buffer_keri(struct strbuf *buffer, struct strbuf *signature,
+			  const char *signing_key)
+{
+	struct child_process keri = CHILD_PROCESS_INIT;
+	int ret;
+	size_t bottom;
+	const char *cp;
+	struct strbuf keri_status = STRBUF_INIT;
+
+	strvec_pushl(&keri.args,
+		     use_format->program,
+		    //  signing_key,
+		     NULL);
+
+	bottom = signature->len;
+
+	// This is what GPG's output looks like.
+	// [GNUPG:] KEY_CONSIDERED B112787FDC1C6FA3DAFE9D62FDC1860BE6AEF762 2
+	// [GNUPG:] BEGIN_SIGNING H10
+	// [GNUPG:] SIG_CREATED D 1 10 00 1728420473 B112787FDC1C6FA3DAFE9D62FDC1860BE6AEF762
+	/*
+	 * When the username signingkey is bad, program could be terminated
+	 * because gpg exits without reading and then write gets SIGPIPE.
+	 */
+	sigchain_push(SIGPIPE, SIG_IGN);
+	ret = pipe_command(&keri, buffer->buf, buffer->len,
+			   signature, 1024, &keri_status, 0);
+	sigchain_pop(SIGPIPE);
+
+	for (cp = keri_status.buf;
+	     cp && (cp = strstr(cp, "[Kerilixir:] SIG_CREATED "));
+	     cp++) {
+		if (cp == keri_status.buf || cp[-1] == '\n')
+			break; /* found */
+	}
+	ret |= !cp;
+	if (ret) {
+		error(_("keri failed to sign the data:\n%s"),
+		      keri_status.len ? keri_status.buf : "(no keri output)");
+		strbuf_release(&keri_status);
+		return -1;
+	}
+	strbuf_release(&keri_status);
+
+	/* Strip CR from the line endings, in case we are on Windows. */
+	remove_cr_after(signature, bottom);
+
+	return 0;
+}
+
+static int verify_keri_signed_buffer(struct signature_check *sigc,
+				    struct gpg_format *fmt,
+				    const char *signature,
+				    size_t signature_size)
+{
+	struct child_process keri = CHILD_PROCESS_INIT;
+	struct tempfile *temp;
+	int ret;
+	struct strbuf keri_stdout = STRBUF_INIT;
+	struct strbuf keri_stderr = STRBUF_INIT;
+
+	temp = mks_tempfile_t(".git_vtag_tmpXXXXXX");
+	if (!temp)
+		return error_errno(_("could not create temporary file"));
+	if (write_in_full(temp->fd, signature, signature_size) < 0 ||
+	    close_tempfile_gently(temp) < 0) {
+		error_errno(_("failed writing detached signature to '%s'"),
+			    temp->filename.buf);
+		delete_tempfile(&temp);
+		return -1;
+	}
+
+	strvec_push(&keri.args, fmt->program);
+	strvec_pushv(&keri.args, fmt->verify_args);
+	strvec_pushl(&keri.args,
+		     "--verify", temp->filename.buf, "-",
+		     NULL);
+
+	sigchain_push(SIGPIPE, SIG_IGN);
+	ret = pipe_command(&keri, sigc->payload, sigc->payload_len, &keri_stdout, 0,
+			   &keri_stderr, 0);
+	sigchain_pop(SIGPIPE);
+
+	delete_tempfile(&temp);
+
+	ret |= !strstr(keri_stdout.buf, "[Kerilixir:] GOODSIG ");
+	sigc->output = strbuf_detach(&keri_stderr, NULL);
+	sigc->gpg_status = strbuf_detach(&keri_stdout, NULL);
+
+	parse_gpg_output(sigc);
+
+	strbuf_release(&keri_stdout);
+	strbuf_release(&keri_stderr);
+
 	return ret;
 }

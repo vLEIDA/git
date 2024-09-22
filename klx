@@ -1,0 +1,3 @@
+#/usr/bin/env bash
+cd ~/vLEIDA/kerilixir
+mix run ./scripts/read_sign_rotate_write.exs
