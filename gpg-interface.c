@@ -1153,7 +1153,7 @@ static int sign_buffer_keri(struct strbuf *buffer, struct strbuf *signature,
 
 	strvec_pushl(&keri.args,
 		     use_format->program,
-		    //  signing_key,
+			 "--sign",
 		     NULL);
 
 	bottom = signature->len;
